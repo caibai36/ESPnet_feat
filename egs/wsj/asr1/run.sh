@@ -6,6 +6,20 @@
 . ./path.sh || exit 1;
 . ./cmd.sh || exit 1;
 
+# Get some scripts for data preparation from Kaldi.
+ln -sf $KALDI_ROOT/egs/wsj/s5/steps/ steps
+ln -sf $KALDI_ROOT/egs/wsj/s5/utils/ utils
+cp $KALDI_ROOT/egs/wsj/s5/local/cstr_wsj_data_prep.sh local
+cp $KALDI_ROOT/egs/wsj/s5/local/wsj_format_data.sh local
+cp $KALDI_ROOT/egs/wsj/s5/local/cstr_ndx2flist.pl local
+cp $KALDI_ROOT/egs/wsj/s5/local/normalize_transcript.pl local
+cp $KALDI_ROOT/egs/wsj/s5/local/flist2scp.pl local
+cp $KALDI_ROOT/egs/wsj/s5/local/find_transcripts.pl local
+# remove the language model part of formatting the data
+sed -i -e '/# Next, for each type/, /done/ d' -e'/tmp/ d' -e '/lm/ d' local/wsj_format_data.sh
+# only retain the the necessary datasets --- 'test_eval92 train_si284 train_si84 test_dev93' --- for experiments
+sed -i 's/train_si284 test_eval92 test_eval93 test_dev93 test_eval92_5k test_eval93_5k test_dev93_5k dev_dt_05 dev_dt_20/test_eval92 train_si284 train_si84 test_dev93/g' local/wsj_format_data.sh
+
 # general configuration
 backend=pytorch
 stage=0        # start from 0 if you need to start from data preparation
@@ -46,8 +60,11 @@ use_valbest_average=false    # if true, the validation `n_average`-best ASR mode
                              # if false, the last `n_average` ASR models will be averaged.
 
 # data
-wsj0=/export/corpora5/LDC/LDC93S6B
-wsj1=/export/corpora5/LDC/LDC94S13B
+# wsj0=/export/corpora5/LDC/LDC93S6B
+# wsj1=/export/corpora5/LDC/LDC94S13B
+# wsj0=/project/nakamura-lab01/Share/Corpora/Speech/en/WSJ/wsj0
+# wsj1=/project/nakamura-lab01/Share/Corpora/Speech/en/WSJ/wsj1
+wsj=/project/nakamura-lab01/Share/Corpora/Speech/en/WSJ/
 
 # exp tag
 tag="" # tag for managing experiments.
@@ -69,8 +86,10 @@ if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
     ### Task dependent. You have to make data the following preparation part by yourself.
     ### But you can utilize Kaldi recipes in most cases
     echo "stage 0: Data preparation"
-    local/wsj_data_prep.sh ${wsj0}/??-{?,??}.? ${wsj1}/??-{?,??}.?
-    local/wsj_format_data.sh
+    # local/wsj_data_prep.sh ${wsj0}/??-{?,??}.? ${wsj1}/??-{?,??}.?
+    # local/wsj_format_data.sh
+    local/cstr_wsj_data_prep.sh $wsj || exit 1;
+    local/wsj_format_data.sh || exit 1;
 fi
 
 feat_tr_dir=${dumpdir}/${train_set}/delta${do_delta}; mkdir -p ${feat_tr_dir}
@@ -175,7 +194,8 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ] && ! ${skip_lm_training}; then
         lmdict=${lmdatadir}/wordlist_${lm_vocabsize}.txt
         mkdir -p ${lmdatadir}
         cut -f 2- -d" " data/${train_set}/text > ${lmdatadir}/train_trans.txt
-        zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+        # zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+	zcat ${wsj}/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
                 | grep -v "<" | tr "[:lower:]" "[:upper:]" > ${lmdatadir}/train_others.txt
         cut -f 2- -d" " data/${train_dev}/text > ${lmdatadir}/valid.txt
         cut -f 2- -d" " data/${train_test}/text > ${lmdatadir}/test.txt
@@ -187,7 +207,8 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ] && ! ${skip_lm_training}; then
         mkdir -p ${lmdatadir}
         text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_set}/text \
             | cut -f 2- -d" " > ${lmdatadir}/train_trans.txt
-        zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+	# zcat ${wsj1}/13-32.1/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
+	zcat ${wsj}/wsj1/doc/lng_modl/lm_train/np_data/{87,88,89}/*.z \
             | grep -v "<" | tr "[:lower:]" "[:upper:]" \
             | text2token.py -n 1 | cut -f 2- -d" " > ${lmdatadir}/train_others.txt
         text2token.py -s 1 -n 1 -l ${nlsyms} data/${train_dev}/text \
@@ -203,7 +224,7 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ] && ! ${skip_lm_training}; then
         --ngpu ${ngpu} \
         --backend ${backend} \
         --verbose 1 \
-        --outdir ${lmexpdir} \
+        --outdir $l{mexpdir} \
         --tensorboard-dir tensorboard/${lmexpname} \
         --train-label ${lmdatadir}/train.txt \
         --valid-label ${lmdatadir}/valid.txt \
@@ -245,6 +266,17 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
         --train-json ${feat_tr_dir}/data.json \
         --valid-json ${feat_dt_dir}/data.json
 fi
+
+
+# set lmexpname
+if [ -z ${lmtag} ]; then
+    lmtag=$(basename ${lm_config%.*})
+    if [ ${use_wordlm} = true ]; then
+        lmtag=${lmtag}_word${lm_vocabsize}
+    fi
+fi
+lmexpname=train_rnnlm_${backend}_${lmtag}
+lmexpdir=exp/${lmexpname}
 
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     echo "stage 5: Decoding"
